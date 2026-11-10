@@ -1,0 +1,38 @@
+# MailCheckr API (NestJS + Fastify) — multi-stage build.
+# Build context: repository root.  docker build -f infra/docker/Dockerfile.api .
+FROM node:22-alpine AS base
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
+WORKDIR /app
+
+FROM base AS deps
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/config/package.json packages/config/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/core/package.json packages/core/package.json
+COPY packages/database/package.json packages/database/package.json
+COPY packages/datasets/package.json packages/datasets/package.json
+RUN pnpm install --frozen-lockfile --filter @mailcheckr/api... || pnpm install --filter @mailcheckr/api...
+
+FROM base AS build
+COPY --from=deps /app /app
+COPY . .
+RUN pnpm --filter @mailcheckr/database exec prisma generate \
+ && pnpm --filter @mailcheckr/contracts build \
+ && pnpm --filter @mailcheckr/datasets build \
+ && pnpm --filter @mailcheckr/core build \
+ && pnpm --filter @mailcheckr/api build
+
+FROM node:22-alpine AS runtime
+RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \
+ && addgroup -S mailcheckr && adduser -S mailcheckr -G mailcheckr
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app /app
+USER mailcheckr
+EXPOSE 4000
+# Migrations are an explicit deploy step (see docs/deployment.md):
+#   docker compose run --rm api pnpm --filter @mailcheckr/database exec prisma migrate deploy
+CMD ["node", "apps/api/dist/main.js"]

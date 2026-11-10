@@ -1,0 +1,75 @@
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+/**
+ * REAL PostgreSQL integration tests — run ONLY when DATABASE_URL points at a
+ * real Postgres (CI provides one). Skipped gracefully locally.
+ *
+ * They apply the hand-written init migration from @mailcheckr/database and
+ * then exercise, against the real database:
+ *  (a) tenant isolation at the SQL level (workspace-scoped queries), and
+ *  (b) credit-ledger idempotency enforced by the real UNIQUE constraint on
+ *      credit_ledger.idempotency_key.
+ * These properties are NOT proven by the in-memory tests.
+ */
+const DATABASE_URL = process.env.DATABASE_URL;
+
+describe.skipIf(!DATABASE_URL)("PostgreSQL integration (real DB)", () => {
+  let pg: any; let client: any;
+  const wsA = "11111111-1111-4111-8111-111111111111";
+  const wsB = "22222222-2222-4222-8222-222222222222";
+  const userA = "33333333-3333-4333-8333-333333333333";
+  const userB = "44444444-4444-4444-8444-444444444444";
+
+  beforeAll(async () => {
+    const pgModule: any = await import("pg");
+    pg = pgModule.default ?? pgModule;
+    client = new pg.Client({ connectionString: DATABASE_URL });
+    await client.connect();
+    const migrationPath = join(__dirname, "../../../../packages/database/prisma/migrations/20261110000000_init/migration.sql");
+    const sql = readFileSync(migrationPath, "utf8");
+    await client.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+    await client.query(sql);
+    await client.query("INSERT INTO users (id, email, password_hash) VALUES ($1,'a@integration.test','x'),($2,'b@integration.test','x')", [userA, userB]);
+    await client.query("INSERT INTO workspaces (id, owner_user_id, name) VALUES ($1,$2,'A'),($3,$4,'B')", [wsA, userA, wsB, userB]);
+  }, 60000);
+
+  afterAll(async () => { await client?.end(); });
+
+  it("migration created all PRD §7 tables", async () => {
+    const res = await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public'");
+    const tables = res.rows.map((r: any) => r.table_name);
+    for (const t of ["users", "workspaces", "api_keys", "verification_batches", "verification_records", "batch_rows", "credit_ledger", "domain_cache", "webhook_endpoints", "audit_events"]) {
+      expect(tables).toContain(t);
+    }
+  });
+
+  it("tenant isolation: workspace-scoped batch query returns nothing for the other tenant", async () => {
+    const batchId = "55555555-5555-4555-8555-555555555555";
+    await client.query("INSERT INTO verification_batches (id, workspace_id, source_type) VALUES ($1,$2,'api')", [batchId, wsA]);
+    const mine = await client.query("SELECT id FROM verification_batches WHERE id=$1 AND workspace_id=$2", [batchId, wsA]);
+    const theirs = await client.query("SELECT id FROM verification_batches WHERE id=$1 AND workspace_id=$2", [batchId, wsB]);
+    expect(mine.rowCount).toBe(1);
+    expect(theirs.rowCount).toBe(0);
+  });
+
+  it("ledger idempotency: the real UNIQUE constraint rejects a duplicate idempotency_key", async () => {
+    await client.query("INSERT INTO credit_ledger (workspace_id, entry_type, quantity, idempotency_key) VALUES ($1,'grant',100,'it:grant:1')", [wsA]);
+    await expect(
+      client.query("INSERT INTO credit_ledger (workspace_id, entry_type, quantity, idempotency_key) VALUES ($1,'grant',100,'it:grant:1')", [wsA]),
+    ).rejects.toMatchObject({ code: "23505" }); // unique_violation
+    const sum = await client.query("SELECT SUM(quantity) AS bal FROM credit_ledger WHERE workspace_id=$1", [wsA]);
+    expect(Number(sum.rows[0].bal)).toBe(100);
+    await client.query("INSERT INTO credit_ledger (workspace_id, entry_type, quantity, idempotency_key) VALUES ($1,'charge',-1,'it:charge:1') ON CONFLICT (idempotency_key) DO NOTHING", [wsA]);
+    await client.query("INSERT INTO credit_ledger (workspace_id, entry_type, quantity, idempotency_key) VALUES ($1,'charge',-1,'it:charge:1') ON CONFLICT (idempotency_key) DO NOTHING", [wsA]);
+    const sum2 = await client.query("SELECT SUM(quantity) AS bal FROM credit_ledger WHERE workspace_id=$1", [wsA]);
+    expect(Number(sum2.rows[0].bal)).toBe(99);
+  });
+
+  it("batch_rows unique (batch_id, row_number) is enforced by the real DB", async () => {
+    const batchId = "55555555-5555-4555-8555-555555555555";
+    await client.query("INSERT INTO batch_rows (batch_id, row_number) VALUES ($1, 1)", [batchId]);
+    await expect(client.query("INSERT INTO batch_rows (batch_id, row_number) VALUES ($1, 1)", [batchId])).rejects.toMatchObject({ code: "23505" });
+  });
+});

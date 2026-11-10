@@ -1,0 +1,2251 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MailCheckr API",
+    "version": "1.0.0",
+    "description": "Explainable email verification with conservative results (PRD \u00a78). Quick mode checks syntax, domain/DNS/MX routing and local risk datasets and never claims a mailbox was tested. Deep SMTP mode is RELEASE-GATED and currently BLOCKED \u2014 outbound TCP/25 is unapproved/untested from the production worker environment (Phase 0 gate), so mode=\"deep\" returns Quick evidence capped at `likely_valid` with reason `smtp_port_unavailable`, never `valid`, and no SMTP traffic is sent. This service never sends email and never issues the SMTP DATA command. `unknown` results and duplicate rows are never charged. This document is served live by the API at GET /v1/openapi.json and kept in the repo at docs/openapi.json; a route-coverage test (apps/api/test/openapi.test.ts) fails if any controller route is missing from it.",
+    "license": {
+      "name": "Proprietary"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "Local development (API_PORT default)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth"
+    },
+    {
+      "name": "Verifications"
+    },
+    {
+      "name": "Batches"
+    },
+    {
+      "name": "API keys"
+    },
+    {
+      "name": "Usage & credits"
+    },
+    {
+      "name": "Account"
+    },
+    {
+      "name": "Operations"
+    }
+  ],
+  "security": [
+    {
+      "bearerJwt": []
+    },
+    {
+      "bearerApiKey": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Liveness probe",
+        "description": "Process liveness only (operational endpoint, outside the versioned product contract). Does not claim database/queue health it has not checked.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service process is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/v1/openapi.json": {
+      "get": {
+        "summary": "This OpenAPI document",
+        "description": "Returns the machine-readable OpenAPI 3.1 specification (docs/openapi.json in the repository) describing every route this API exposes. Public so integrators and tooling can fetch it without credentials.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document as JSON.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Operations"
+        ]
+      }
+    },
+    "/v1/auth/register": {
+      "post": {
+        "summary": "Register a new account",
+        "description": "Creates a user and their single workspace, grants the provisional free credits via a ledger `grant` entry, and returns a session JWT. Passwords are stored only as bcrypt hashes; passwords must be at least 10 characters.",
+        "security": [],
+        "responses": {
+          "201": {
+            "description": "Account created; session token issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Auth"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthCredentials"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/login": {
+      "post": {
+        "summary": "Log in",
+        "description": "Verifies credentials against the stored password hash. Unknown user and wrong password return the same INVALID_CREDENTIALS error (no account enumeration).",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Session token issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Auth"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthCredentials"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "summary": "Log out",
+        "description": "Records the logout in the audit log. Sessions are stateless JWTs, so clients must also discard the token; server-side revocation is a documented production hardening step.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Logged out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "summary": "Current session user",
+        "description": "Requires a user-session JWT (an API key has no user identity and is rejected).",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session user.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Auth"
+        ]
+      }
+    },
+    "/v1/auth/password-reset/request": {
+      "post": {
+        "summary": "Request a password reset",
+        "description": "Always returns ok:true, whether or not the email belongs to an account (no enumeration). The reset token is stored only as a SHA-256 hash and expires after 1 hour. Delivery requires a transactional mail provider: MailCheckr never sends email itself, so in non-production the token is additionally returned as `devResetToken` for local testing; in production a provider integration must deliver it.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Request accepted (generic response).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PasswordResetRequestResponse"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Auth"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordResetRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/password-reset/confirm": {
+      "post": {
+        "summary": "Confirm a password reset",
+        "description": "Consumes a single-use reset token and sets a new password (minimum 10 characters). Invalid/expired/used tokens return RESET_TOKEN_INVALID.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Password changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Reset token invalid or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Auth"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordResetConfirm"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/verifications": {
+      "post": {
+        "summary": "Verify a single email address",
+        "description": "Quick mode (default): syntax/normalisation + domain/DNS/MX + local risk datasets. It never claims the individual mailbox was checked \u2014 a passing address is `likely_valid` with reason `smtp_not_attempted_quick_mode`. Deep mode (mode=\"deep\") is RELEASE-GATED and currently BLOCKED: outbound TCP/25 has not been tested/approved from any production worker (PRD Phase 0 / \u00a76), so SMTP_DEEP_ENABLED and SMTP_EGRESS_APPROVED are both false. While the gate is off, a deep request is NOT simulated and never returns `valid`: it returns the Quick (syntax/DNS/risk) classification capped at `likely_valid` with reason code `smtp_port_unavailable`. No SMTP DATA command is ever issued by this service, in any mode. Charging (PRD \u00a79): one credit for a billable terminal result; `unknown` results are NOT charged; a repeated `idempotency_key` returns the original record without re-executing or re-charging. Rate-limited per tenant.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Verification result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationResult"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Insufficient credits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited; see retry_after_seconds in the envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Verifications"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SingleVerificationRequest"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List recent single checks",
+        "description": "Recent single (non-batch) verifications for the caller's workspace, newest first. Backs the dashboard's Recent checks table.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent verification results.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Verifications"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Page/record cap (server-clamped)."
+          }
+        ]
+      }
+    },
+    "/v1/batches": {
+      "post": {
+        "summary": "Create and process a batch of email addresses",
+        "description": "JSON batch (cap: 1,000 emails per request). Rows are deduplicated on the normalised address: duplicates point at the canonical row and are NOT charged; `unknown` outcomes are NOT charged. In the API-only runtime the batch is processed synchronously before responding; in the full deployment the identical processing runs in the BullMQ worker (apps/worker) and the batch is polled via GET /v1/batches/{id}. Batch creation is rate-limited per workspace (default 5/hour). Deep mode (mode=\"deep\") is RELEASE-GATED and currently BLOCKED: outbound TCP/25 has not been tested/approved from any production worker (PRD Phase 0 / \u00a76), so SMTP_DEEP_ENABLED and SMTP_EGRESS_APPROVED are both false. While the gate is off, a deep request is NOT simulated and never returns `valid`: it returns the Quick (syntax/DNS/risk) classification capped at `likely_valid` with reason code `smtp_port_unavailable`. No SMTP DATA command is ever issued by this service, in any mode.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The processed batch summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Insufficient credits.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited; see retry_after_seconds in the envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchCreateRequest"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List batches",
+        "description": "The caller's workspace batches, newest first.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch summaries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Page/record cap (server-clamped)."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/v1/batches/{id}": {
+      "get": {
+        "summary": "Get a batch",
+        "description": "Batch status and counters for a batch in the caller's workspace.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resource ID within the caller's workspace."
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Delete a batch and its data",
+        "description": "Verified purge ahead of the retention schedule: the batch, its rows and its verification records are removed immediately; credit-ledger entries are retained as the accounting record with their batch/record links severed.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Batch purged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchDeleted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resource ID within the caller's workspace."
+          }
+        ]
+      }
+    },
+    "/v1/batches/{id}/results": {
+      "get": {
+        "summary": "Page through batch results",
+        "description": "Cursor-paginated per-row results. Filter with `status`; note `duplicate` is a row-level disposition only (duplicate rows are not charged), never a mailbox status.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of row results.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResults"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resource ID within the caller's workspace."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque cursor from a previous response's next_cursor."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Page/record cap (server-clamped)."
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "valid",
+                "likely_valid",
+                "invalid",
+                "risky",
+                "unknown",
+                "duplicate"
+              ]
+            },
+            "description": "Optional status filter."
+          }
+        ]
+      }
+    },
+    "/v1/batches/{id}/cancel": {
+      "post": {
+        "summary": "Cancel a batch",
+        "description": "Cancels a non-terminal batch and releases any unused reserved credits (idempotent ledger `release`). Terminal batches return 409 BATCH_NOT_CANCELLABLE.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancelled batch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Batch"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Batch is already in a terminal status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resource ID within the caller's workspace."
+          }
+        ]
+      }
+    },
+    "/v1/batches/{id}/export": {
+      "post": {
+        "summary": "Export batch results as CSV",
+        "description": "Streams the batch results as a CSV download (Content-Disposition: attachment). Row order is preserved, duplicate rows are marked `duplicate`, and cells are escaped against CSV formula injection.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV file download.",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Batches"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resource ID within the caller's workspace."
+          }
+        ]
+      }
+    },
+    "/v1/api-keys": {
+      "post": {
+        "summary": "Create an API key",
+        "description": "Generates an `mc_live_\u2026` secret with a CSPRNG. The full secret is returned EXACTLY ONCE in this response (`secret`); only a keyed HMAC digest is stored, so it cannot be recovered later. Never send API keys in query strings.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The new key, including its one-time secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyCreated"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "API keys"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApiKeyCreateRequest"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "List API keys",
+        "description": "Lists the workspace's keys by prefix and metadata only \u2014 secrets are never returned again.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API keys (prefix only).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "API keys"
+        ]
+      }
+    },
+    "/v1/api-keys/{id}": {
+      "delete": {
+        "summary": "Revoke an API key",
+        "description": "Revokes the key immediately; subsequent requests with it return 401.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiKeyRevoked"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "API keys"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Resource ID within the caller's workspace."
+          }
+        ]
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "summary": "Usage and credit balance",
+        "description": "Current credit balance (derived from the immutable ledger, never a mutable counter), grant/charge totals, outstanding reservations, and check counts for the current monthly period.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Usage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Usage & credits"
+        ]
+      }
+    },
+    "/v1/credits/ledger": {
+      "get": {
+        "summary": "Credit ledger entries",
+        "description": "Append-only ledger entries for the workspace (grant | reserve | charge | release | refund | purchase | adjustment), newest usage first by page, plus the derived balance. `unknown` verifications and duplicate rows never produce a charge entry.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ledger page plus balance.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreditLedger"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Usage & credits"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Page/record cap (server-clamped)."
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ]
+      }
+    },
+    "/v1/account/settings": {
+      "get": {
+        "summary": "Workspace account settings",
+        "description": "The settings actually in force for the workspace, including the retention windows read live from server configuration (defaults: source files 24 hours, results 7 days) and the credit summary.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Account"
+        ]
+      }
+    },
+    "/v1/account": {
+      "delete": {
+        "summary": "Delete the account (verified purge)",
+        "description": "Requires a user-session JWT \u2014 an API key is refused with 403, and only the workspace owner may delete. API callers may send {\"confirmation\":\"DELETE\"} (validated when present); the dashboard gates client-side by typing DELETE and sends no body. This is a verified purge, not a deferred request: batches, verification records, batch rows and API keys are deleted, credit-ledger entries and amounts are retained with links severed, an audit event is written, and the workspace and user are deleted.",
+        "security": [
+          {
+            "bearerJwt": []
+          },
+          {
+            "bearerApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account purged, with removal counts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountDeleted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "API-key callers and non-owners are refused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing/invalid JWT or API key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found in the caller's workspace (cross-workspace IDs also return 404, to avoid ID enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "Account"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "confirmation": {
+                    "type": "string",
+                    "enum": [
+                      "DELETE"
+                    ]
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerJwt": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Dashboard session JWT from POST /v1/auth/register or /v1/auth/login."
+      },
+      "bearerApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Programmatic API key: Authorization: Bearer mc_live_<secret>. Shown once at creation, stored only as a keyed hash, revocable, scoped. Never put API keys in query strings (PRD \u00a78.1)."
+      }
+    },
+    "schemas": {
+      "VerificationStatus": {
+        "type": "string",
+        "enum": [
+          "valid",
+          "likely_valid",
+          "invalid",
+          "risky",
+          "unknown"
+        ],
+        "description": "Canonical mailbox status (PRD \u00a74.2). `valid` means only that the target MX accepted the recipient at the SMTP RCPT stage with a conclusive non-catch-all result; it is never reachable while Deep SMTP is gated off. `duplicate` is deliberately absent: it is a row-level disposition, not a mailbox status."
+      },
+      "ReasonCode": {
+        "type": "string",
+        "enum": [
+          "syntax_invalid",
+          "domain_nxdomain",
+          "dns_temporary_failure",
+          "null_mx",
+          "mx_missing_implicit_route_checked",
+          "mx_host_unresolved",
+          "disposable_domain",
+          "role_account",
+          "free_provider",
+          "smtp_not_attempted_quick_mode",
+          "smtp_port_unavailable",
+          "smtp_starttls_unavailable",
+          "smtp_tls_handshake_failed",
+          "smtp_connection_timeout",
+          "smtp_connection_refused",
+          "smtp_greylisted",
+          "smtp_rate_limited",
+          "smtp_policy_rejected",
+          "smtp_mailbox_accepted",
+          "smtp_mailbox_rejected_definitive",
+          "catch_all_suspected",
+          "provider_defers_recipient_validation",
+          "internationalized_local_part_unsupported",
+          "catch_all_unchecked"
+        ],
+        "description": "Stable machine-readable reason code (PRD \u00a74.3 plus catch_all_unchecked from \u00a74.6). Every result carries at least one."
+      },
+      "Confidence": {
+        "type": "string",
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "description": "Qualitative evidence-strength label only (PRD \u00a74.4) \u2014 NOT a statistical probability, and there is deliberately no numeric score anywhere in this API."
+      },
+      "VerificationMode": {
+        "type": "string",
+        "enum": [
+          "quick",
+          "deep"
+        ],
+        "description": "quick = syntax + DNS/MX + local risk datasets (mailbox not tested). deep = SMTP RCPT-stage probe, release-gated and currently BLOCKED (see the mode=deep notes on the verification operations)."
+      },
+      "CheckState": {
+        "type": "string",
+        "enum": [
+          "passed",
+          "failed",
+          "not_checked",
+          "inconclusive"
+        ]
+      },
+      "Checks": {
+        "type": "object",
+        "properties": {
+          "syntax": {
+            "$ref": "#/components/schemas/CheckState"
+          },
+          "domain": {
+            "$ref": "#/components/schemas/CheckState"
+          },
+          "mx": {
+            "$ref": "#/components/schemas/CheckState"
+          },
+          "smtp_mailbox": {
+            "$ref": "#/components/schemas/CheckState"
+          },
+          "disposable": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "not_checked"
+            ]
+          },
+          "role_account": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "flagged",
+              "not_checked"
+            ]
+          }
+        },
+        "additionalProperties": true,
+        "description": "Per-check outcomes actually observed. smtp_mailbox is `not_checked` in Quick mode and while the Deep gate is off."
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "request_id"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Stable machine-readable error code, e.g. VALIDATION_ERROR, UNAUTHORIZED, NOT_FOUND, INSUFFICIENT_CREDITS, RATE_LIMITED."
+              },
+              "message": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string",
+                "example": "req_0123456789abcdef"
+              },
+              "retry_after_seconds": {
+                "type": "integer",
+                "description": "Present on 429 responses."
+              }
+            }
+          }
+        },
+        "description": "The single error shape for every endpoint (PRD \u00a78.6). Raw SMTP transcripts and stack traces are never returned."
+      },
+      "AuthCredentials": {
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "maxLength": 320
+          },
+          "password": {
+            "type": "string",
+            "minLength": 10,
+            "format": "password"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "AuthResponse": {
+        "type": "object",
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "Session JWT (also returned as accessToken)."
+          },
+          "accessToken": {
+            "type": "string"
+          },
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "email": {
+                "type": "string"
+              },
+              "workspace_id": {
+                "type": "string"
+              },
+              "created_at": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "workspace": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "planCode": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OkResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        }
+      },
+      "PasswordResetRequest": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          }
+        }
+      },
+      "PasswordResetRequestResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "devResetToken": {
+            "type": "string",
+            "description": "Non-production only: the plaintext reset token, returned so the flow is testable locally. Never present in production responses."
+          }
+        }
+      },
+      "PasswordResetConfirm": {
+        "type": "object",
+        "required": [
+          "token",
+          "password"
+        ],
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 10,
+            "format": "password"
+          }
+        }
+      },
+      "SingleVerificationRequest": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "maxLength": 320,
+            "example": "person@example.com"
+          },
+          "mode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VerificationMode"
+              }
+            ],
+            "default": "quick",
+            "description": "Defaults to quick. deep is release-gated/BLOCKED: while the gate is off the result is capped at likely_valid with reason smtp_port_unavailable and is never `valid`."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "Client-generated unique key; retries return the original result without re-charging."
+          }
+        }
+      },
+      "VerificationResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/VerificationStatus"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/VerificationMode"
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence"
+          },
+          "email": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string",
+            "nullable": true
+          },
+          "checks": {
+            "$ref": "#/components/schemas/Checks"
+          },
+          "reason_codes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReasonCode"
+            },
+            "minItems": 1
+          },
+          "explanation": {
+            "type": "string",
+            "description": "Human-readable explanation of exactly what was and was not checked."
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "description": "A single verification result (PRD \u00a74.3/\u00a78.2): status, evidence strength, checks performed, reason codes and an honest explanation. DNS evidence and SMTP evidence are distinguishable via `checks` and `reason_codes`; there is no numeric score."
+      },
+      "VerificationList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VerificationResult"
+            }
+          }
+        }
+      },
+      "BatchCreateRequest": {
+        "type": "object",
+        "required": [
+          "emails"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 320
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          },
+          "mode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/VerificationMode"
+              }
+            ],
+            "default": "quick"
+          },
+          "webhook_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Accepted for forward compatibility; webhooks are P1 and the field is inert in the MVP (never silently treated as live)."
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 200
+          }
+        }
+      },
+      "Batch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "created",
+              "queued",
+              "processing",
+              "completed",
+              "completed_with_errors",
+              "failed",
+              "cancelled",
+              "expired"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/VerificationMode"
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "upload",
+              "paste",
+              "api"
+            ]
+          },
+          "row_count": {
+            "type": "integer"
+          },
+          "unique_count": {
+            "type": "integer"
+          },
+          "duplicate_count": {
+            "type": "integer"
+          },
+          "completed_count": {
+            "type": "integer"
+          },
+          "invalid_count": {
+            "type": "integer"
+          },
+          "risky_count": {
+            "type": "integer"
+          },
+          "unknown_count": {
+            "type": "integer"
+          },
+          "credits_reserved": {
+            "type": "integer"
+          },
+          "credits_charged": {
+            "type": "integer"
+          },
+          "credits_refunded": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
+      "BatchList": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Batch"
+            }
+          }
+        }
+      },
+      "BatchResultItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "row_number": {
+            "type": "integer"
+          },
+          "email": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string",
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "valid",
+              "likely_valid",
+              "invalid",
+              "risky",
+              "unknown",
+              "duplicate"
+            ],
+            "description": "Mailbox status, or `duplicate` for a row-level duplicate (result fields then mirror the canonical row; never charged)."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/VerificationMode"
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence"
+          },
+          "reason_codes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReasonCode"
+            }
+          },
+          "checks": {
+            "$ref": "#/components/schemas/Checks"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "BatchResults": {
+        "type": "object",
+        "properties": {
+          "batch_id": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchResultItem"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BatchDeleted": {
+        "type": "object",
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "records_removed": {
+            "type": "integer"
+          }
+        }
+      },
+      "ApiKeyCreateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "e.g. verifications:write, batches:write, batches:read, usage:read."
+          }
+        }
+      },
+      "ApiKeyCreated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "keyPrefix": {
+            "type": "string",
+            "description": "Non-secret display prefix."
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "secret": {
+            "type": "string",
+            "description": "The full mc_live_\u2026 secret. Returned exactly once, at creation; it is stored only as a keyed hash and cannot be recovered."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ApiKey": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "keyPrefix": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lastUsedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "revokedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ApiKeyList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/ApiKey"
+        }
+      },
+      "ApiKeyRevoked": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "revokedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "plan_code": {
+            "type": "string"
+          },
+          "credits_balance": {
+            "type": "integer"
+          },
+          "credits_granted": {
+            "type": "integer"
+          },
+          "credits_charged": {
+            "type": "integer"
+          },
+          "credits_reserved": {
+            "type": "integer"
+          },
+          "credits_reserved_outstanding": {
+            "type": "integer"
+          },
+          "checks_total": {
+            "type": "integer"
+          },
+          "checks_this_month": {
+            "type": "integer"
+          },
+          "verifications_total": {
+            "type": "integer"
+          },
+          "period_start": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_end": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CreditLedgerEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "entry_type": {
+            "type": "string",
+            "enum": [
+              "grant",
+              "reserve",
+              "charge",
+              "release",
+              "refund",
+              "purchase",
+              "adjustment"
+            ]
+          },
+          "quantity": {
+            "type": "integer",
+            "description": "Signed quantity per the ledger convention (charges are negative)."
+          },
+          "batch_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verification_record_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CreditLedger": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CreditLedgerEntry"
+            }
+          },
+          "balance": {
+            "type": "integer"
+          }
+        }
+      },
+      "AccountSettings": {
+        "type": "object",
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          },
+          "plan_code": {
+            "type": "string"
+          },
+          "source_retention_hours": {
+            "type": "number"
+          },
+          "source_retention_days": {
+            "type": "number"
+          },
+          "result_retention_days": {
+            "type": "integer"
+          },
+          "retention_days": {
+            "type": "integer"
+          },
+          "credits_balance": {
+            "type": "integer"
+          },
+          "credits_granted": {
+            "type": "integer"
+          },
+          "credits_charged": {
+            "type": "integer"
+          },
+          "credits_reserved": {
+            "type": "integer"
+          },
+          "checks_total": {
+            "type": "integer"
+          }
+        }
+      },
+      "AccountDeleted": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "deleted"
+            ]
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "workspace_id": {
+            "type": "string"
+          },
+          "batches_removed": {
+            "type": "integer"
+          },
+          "records_removed": {
+            "type": "integer"
+          },
+          "api_keys_removed": {
+            "type": "integer"
+          },
+          "ledger_entries_retained": {
+            "type": "integer"
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

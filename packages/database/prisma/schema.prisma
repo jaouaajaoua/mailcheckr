@@ -1,0 +1,303 @@
+// MailCheckr database schema — PRD §7.
+// UUID primary keys everywhere. Every tenant-owned record carries workspace_id.
+// Credit mutations are an immutable ledger with a unique idempotency_key.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum BatchSourceType {
+  upload
+  paste
+  api
+}
+
+enum VerificationMode {
+  quick
+  deep
+}
+
+enum BatchStatus {
+  created
+  queued
+  processing
+  completed
+  completed_with_errors
+  failed
+  cancelled
+  expired
+}
+
+enum VerificationStatus {
+  valid
+  likely_valid
+  invalid
+  risky
+  unknown
+}
+
+enum Confidence {
+  high
+  medium
+  low
+}
+
+enum CreditEntryType {
+  grant
+  reserve
+  charge
+  release
+  refund
+  purchase
+  adjustment
+}
+
+enum DnsStatus {
+  ok
+  nxdomain
+  servfail
+  timeout
+  null_mx
+  no_mx_implicit_route
+  unresolved
+}
+
+enum CatchAllStatus {
+  suspected
+  not_suspected
+  unchecked
+  inconclusive
+}
+
+model User {
+  id              String    @id @default(uuid()) @db.Uuid
+  email           String    @unique // normalized (trimmed, domain lowercased) at the service layer
+  passwordHash    String?   @map("password_hash")
+  authSubject     String?   @unique @map("auth_subject") // external IdP subject, alternative to password_hash
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  ownedWorkspaces Workspace[] @relation("WorkspaceOwner")
+  passwordResets  PasswordResetToken[]
+
+  @@map("users")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") // SHA-256 hash only; plaintext token is never stored
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+model Workspace {
+  id        String   @id @default(uuid()) @db.Uuid
+  ownerUserId String @map("owner_user_id") @db.Uuid
+  name      String
+  planCode  String   @default("free") @map("plan_code")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  owner              User                 @relation("WorkspaceOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+  apiKeys            ApiKey[]
+  batches            VerificationBatch[]
+  records            VerificationRecord[]
+  creditLedger       CreditLedger[]
+  webhookEndpoints   WebhookEndpoint[]
+  auditEvents        AuditEvent[]
+
+  @@index([ownerUserId])
+  @@map("workspaces")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  name       String
+  keyPrefix  String    @map("key_prefix") // non-secret display identifier, e.g. "mc_live_ab12cd34"
+  keyHash    String    @unique @map("key_hash") // HMAC-SHA256 digest only; plaintext secret is never stored
+  scopes     Json      @default("[\"verify:write\", \"verify:read\"]")
+  lastUsedAt DateTime? @map("last_used_at")
+  expiresAt  DateTime? @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@index([keyPrefix])
+  @@map("api_keys")
+}
+
+model VerificationBatch {
+  id              String          @id @default(uuid()) @db.Uuid
+  workspaceId     String          @map("workspace_id") @db.Uuid
+  createdByUserId String?         @map("created_by_user_id") @db.Uuid
+  name            String? // caller-supplied label from POST /v1/batches (PRD §8.3); UI falls back to the id
+  sourceType      BatchSourceType @map("source_type")
+  sourceObjectKey String?         @map("source_object_key")
+  originalFilename String?        @map("original_filename")
+  emailColumnName String?         @map("email_column_name")
+  mode            VerificationMode @default(quick)
+  status          BatchStatus     @default(created)
+  rowCount        Int             @default(0) @map("row_count")
+  uniqueCount     Int             @default(0) @map("unique_count")
+  duplicateCount  Int             @default(0) @map("duplicate_count")
+  completedCount  Int             @default(0) @map("completed_count")
+  invalidCount    Int             @default(0) @map("invalid_count")
+  riskyCount      Int             @default(0) @map("risky_count")
+  unknownCount    Int             @default(0) @map("unknown_count")
+  creditsReserved Int             @default(0) @map("credits_reserved")
+  creditsCharged  Int             @default(0) @map("credits_charged")
+  creditsRefunded Int             @default(0) @map("credits_refunded")
+  idempotencyKey  String?         @unique @map("idempotency_key")
+  startedAt       DateTime?       @map("started_at")
+  completedAt     DateTime?       @map("completed_at")
+  expiresAt       DateTime?       @map("expires_at")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  workspace Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  records   VerificationRecord[]
+  rows      BatchRow[]
+  ledger    CreditLedger[]
+
+  @@index([workspaceId, status])
+  @@index([workspaceId, createdAt])
+  @@map("verification_batches")
+}
+
+model VerificationRecord {
+  id                 String             @id @default(uuid()) @db.Uuid
+  workspaceId        String             @map("workspace_id") @db.Uuid
+  batchId            String?            @map("batch_id") @db.Uuid
+  emailCiphertext    String             @map("email_ciphertext") // AES-256-GCM ciphertext at the application layer
+  emailHmac          String             @map("email_hmac") // keyed HMAC digest for duplicate lookup; never an unsalted plain hash
+  domainNormalized   String             @map("domain_normalized")
+  rowNumber          Int?               @map("row_number")
+  originalRowPayload Json?              @map("original_row_payload") // encrypted JSON payload reference/payload per retention policy
+  status             VerificationStatus
+  mode               VerificationMode
+  confidence         Confidence
+  reasonCodes        Json               @map("reason_codes")
+  checksPerformed    Json               @map("checks_performed")
+  dnsEvidence        Json?              @map("dns_evidence")
+  smtpEvidence       Json?              @map("smtp_evidence") // minimized/redacted only; never raw transcripts
+  idempotencyKey     String?            @unique @map("idempotency_key")
+  checkedAt          DateTime           @map("checked_at")
+  expiresAt          DateTime?          @map("expires_at")
+  createdAt          DateTime           @default(now()) @map("created_at")
+
+  workspace Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  batch     VerificationBatch? @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  batchRows BatchRow[]
+  ledger    CreditLedger[]
+
+  @@index([workspaceId, batchId])
+  @@index([workspaceId, emailHmac])
+  @@index([domainNormalized])
+  @@map("verification_records")
+}
+
+model BatchRow {
+  id                   String  @id @default(uuid()) @db.Uuid
+  batchId              String  @map("batch_id") @db.Uuid
+  rowNumber            Int     @map("row_number")
+  emailRecordId        String? @map("email_record_id") @db.Uuid
+  isDuplicate          Boolean @default(false) @map("is_duplicate")
+  duplicateOfRowNumber Int?    @map("duplicate_of_row_number")
+  parseErrorCode       String? @map("parse_error_code")
+  originalRowRef       String? @map("original_row_ref") // encrypted row payload reference
+
+  batch       VerificationBatch   @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  emailRecord VerificationRecord? @relation(fields: [emailRecordId], references: [id], onDelete: SetNull)
+
+  @@unique([batchId, rowNumber])
+  @@index([batchId, isDuplicate])
+  @@map("batch_rows")
+}
+
+model CreditLedger {
+  id                   String          @id @default(uuid()) @db.Uuid
+  // Nullable + SetNull: on verified account deletion the ledger entries and
+  // their amounts are retained as the accounting record while the workspace
+  // (and the batch/record links, severed explicitly first) are purged.
+  workspaceId          String?         @map("workspace_id") @db.Uuid
+  batchId              String?         @map("batch_id") @db.Uuid
+  verificationRecordId String?         @map("verification_record_id") @db.Uuid
+  entryType            CreditEntryType @map("entry_type")
+  quantity             Int // signed: grants/purchases positive-in; charges negative-out is NOT used — see README: quantity is signed delta to balance
+  idempotencyKey       String          @unique @map("idempotency_key")
+  description          String?
+  createdAt            DateTime        @default(now()) @map("created_at")
+
+  workspace          Workspace?          @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  batch              VerificationBatch?  @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  verificationRecord VerificationRecord? @relation(fields: [verificationRecordId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, entryType])
+  @@map("credit_ledger")
+}
+
+model DomainCache {
+  domainNormalized    String          @id @map("domain_normalized")
+  mxRecords           Json?           @map("mx_records")
+  dnsStatus           DnsStatus?      @map("dns_status")
+  disposableDomainFlag Boolean        @default(false) @map("disposable_domain_flag")
+  freeProviderFlag    Boolean         @default(false) @map("free_provider_flag")
+  catchAllStatus      CatchAllStatus? @map("catch_all_status")
+  smtpCapabilityStatus String?        @map("smtp_capability_status")
+  sourceDatasetVersion String?        @map("source_dataset_version")
+  checkedAt           DateTime        @map("checked_at")
+  expiresAt           DateTime        @map("expires_at")
+
+  @@map("domain_cache")
+}
+
+model WebhookEndpoint {
+  id              String    @id @default(uuid()) @db.Uuid
+  workspaceId     String    @map("workspace_id") @db.Uuid
+  url             String
+  secretCiphertext String   @map("secret_ciphertext")
+  events          Json      @default("[\"batch.completed\", \"batch.failed\"]")
+  isActive        Boolean   @default(true) @map("is_active")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+  @@map("webhook_endpoints")
+}
+
+model AuditEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String?  @map("workspace_id") @db.Uuid
+  actorId      String?  @map("actor_id") @db.Uuid
+  action       String
+  resourceType String   @map("resource_type")
+  resourceId   String?  @map("resource_id")
+  metadata     Json? // minimized metadata only; never raw API keys, passwords, or full email lists
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([resourceType, resourceId])
+  @@map("audit_events")
+}

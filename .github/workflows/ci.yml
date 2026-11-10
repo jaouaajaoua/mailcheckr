@@ -1,0 +1,237 @@
+name: CI
+
+# ============================================================================
+# MailCheckr CI — this workflow is the designated EVIDENCE for database and
+# queue integration (the local build sandbox has no Docker/PostgreSQL/Redis).
+#
+# Acceptance rules enforced here:
+#  - Real PostgreSQL 16 and Redis 7 service containers (health-checked).
+#  - Prisma validate + generate + migrate deploy run against real Postgres.
+#  - The DB-gated tests (apps/api/test/integration/db.integration.test.ts)
+#    and the Redis-gated test (apps/worker/src/queue.integration.test.ts)
+#    MUST actually execute. A dedicated guard step fails the job if either
+#    suite reports as skipped.
+#  - Deep SMTP stays disabled (SMTP_DEEP_ENABLED=false,
+#    SMTP_EGRESS_APPROVED=false). No third-party verification services.
+#
+# Integration-database design decision (read before changing):
+#  - `mailcheckr_test` is owned by Prisma: validate/generate/migrate deploy
+#    run against it, proving the full migration chain (init +
+#    batch_name_and_ledger_retention) applies cleanly to a real database.
+#  - `mailcheckr_integration` is owned by the DB integration tests. Those
+#    tests DROP SCHEMA public CASCADE and apply ONLY the init migration
+#    themselves via raw `pg` (see the test file header). Pointing them at
+#    the Prisma-migrated database would destroy the migrated state and the
+#    `_prisma_migrations` bookkeeping, so the workflow creates a second
+#    database (scripts/ci/create-integration-db.mjs) and runs the DB
+#    integration step with DATABASE_URL pointed at it.
+#  - `prisma generate` intentionally runs BEFORE the typecheck step:
+#    packages/database typechecks against the generated @prisma/client, so
+#    typechecking before generation fails even when the code is correct.
+#  - DATABASE_URL / REDIS_URL are set per-step, NOT job-wide: unit-test
+#    steps must run with them unset (pure unit behaviour), and only the
+#    Prisma steps and the dedicated integration steps receive them.
+# ============================================================================
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mailcheckr
+          POSTGRES_PASSWORD: mailcheckr_ci
+          POSTGRES_DB: mailcheckr_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mailcheckr -d mailcheckr_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # Test-only dummy values — CI_TEST ONLY, never used outside this job.
+      JWT_SECRET_CI_TEST: ci-test-only-jwt-secret-not-a-real-secret-0001
+      JWT_SECRET: ci-test-only-jwt-secret-not-a-real-secret-0001
+      # 64 hex chars as required by the AES-256-GCM config; fixed dummy bytes.
+      ENCRYPTION_KEY_CI_TEST: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      HMAC_KEY_CI_TEST: ci-test-only-hmac-key-not-a-real-secret-0001
+      HMAC_KEY: ci-test-only-hmac-key-not-a-real-secret-0001
+      # Deep SMTP release gate: OFF in CI, exactly as in production defaults.
+      SMTP_DEEP_ENABLED: "false"
+      SMTP_EGRESS_APPROVED: "false"
+      # Resource-protection limits (docs/api.md) — same names as .env.example.
+      RATE_LIMIT_PER_MINUTE: "120"
+      MAX_UPLOAD_BYTES: "5242880"
+      MAX_CSV_ROWS: "10000"
+      MAX_BATCH_JSON_EMAILS: "1000"
+      WORKER_MAX_ATTEMPTS: "3"
+      PER_DOMAIN_CONCURRENCY: "2"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: |
+          mkdir -p ci-reports
+          pnpm install --frozen-lockfile
+
+      - name: Lint (graceful — root package.json defines no lint script)
+        run: |
+          if node -e "process.exit(require('./package.json').scripts && require('./package.json').scripts.lint ? 0 : 1)"; then
+            pnpm lint
+          else
+            echo "No root lint script defined — skipping lint step."
+          fi
+
+      # ---- Prisma against the real PostgreSQL service ---------------------
+      - name: Prisma validate (real CI environment)
+        env:
+          DATABASE_URL: postgresql://mailcheckr:mailcheckr_ci@localhost:5432/mailcheckr_test
+        run: pnpm --filter @mailcheckr/database exec prisma validate 2>&1 | tee ci-reports/prisma-validate.log
+
+      - name: Prisma generate
+        env:
+          DATABASE_URL: postgresql://mailcheckr:mailcheckr_ci@localhost:5432/mailcheckr_test
+        run: pnpm --filter @mailcheckr/database exec prisma generate 2>&1 | tee ci-reports/prisma-generate.log
+
+      - name: Create dedicated integration-test database
+        env:
+          ADMIN_DATABASE_URL: postgresql://mailcheckr:mailcheckr_ci@localhost:5432/postgres
+          INTEGRATION_DB_NAME: mailcheckr_integration
+        run: node scripts/ci/create-integration-db.mjs
+
+      - name: Prisma migrate deploy (all migrations, real Postgres)
+        env:
+          DATABASE_URL: postgresql://mailcheckr:mailcheckr_ci@localhost:5432/mailcheckr_test
+        run: pnpm --filter @mailcheckr/database exec prisma migrate deploy 2>&1 | tee ci-reports/prisma-migrate-deploy.log
+
+      # ---- Typecheck (after prisma generate — see header note) ------------
+      - name: Typecheck (all packages, incl. web + database)
+        run: pnpm -r --if-present typecheck 2>&1 | tee ci-reports/typecheck.log
+
+      # ---- Unit tests (no external services; gated suites self-skip) ------
+      - name: Unit tests — contracts, datasets, config, core
+        run: |
+          set -o pipefail
+          pnpm --filter @mailcheckr/contracts test 2>&1 | tee ci-reports/test-contracts.log
+          pnpm --filter @mailcheckr/datasets test 2>&1 | tee ci-reports/test-datasets.log
+          pnpm --filter @mailcheckr/config test 2>&1 | tee ci-reports/test-config.log
+          pnpm --filter @mailcheckr/core test 2>&1 | tee ci-reports/test-core.log
+
+      - name: Unit tests — API (unit + HTTP/OpenAPI contract suites)
+        # DATABASE_URL / REDIS_URL deliberately unset: the DB/Redis-gated
+        # suites self-skip in this step and are proven separately below.
+        run: |
+          set -o pipefail
+          pnpm --filter @mailcheckr/api test 2>&1 | tee ci-reports/test-api.log
+
+      - name: Unit tests — worker (processors + resource protection)
+        run: |
+          set -o pipefail
+          pnpm --filter @mailcheckr/worker test 2>&1 | tee ci-reports/test-worker.log
+
+      # ---- REAL integration tests (must execute — guarded below) ----------
+      - name: Integration — API against real PostgreSQL (db.integration)
+        env:
+          # Dedicated test-owned database — see header design decision.
+          DATABASE_URL: postgresql://mailcheckr:mailcheckr_ci@localhost:5432/mailcheckr_integration
+        run: |
+          set -o pipefail
+          cd apps/api
+          npx vitest run test/integration/db.integration.test.ts --reporter=verbose 2>&1 | tee ../../ci-reports/api-db-integration.log
+
+      - name: Integration — worker against real Redis (queue.integration)
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: |
+          set -o pipefail
+          cd apps/worker
+          npx vitest run src/queue.integration.test.ts --reporter=verbose 2>&1 | tee ../../ci-reports/worker-queue-integration.log
+
+      - name: Guard — integration tests actually executed (fail if skipped)
+        run: |
+          set -e
+          # Strip any ANSI colour codes so the greps below are stable
+          # whether or not the runner forces coloured vitest output.
+          sed -i -r 's/\x1b\[[0-9;]*m//g' ci-reports/api-db-integration.log ci-reports/worker-queue-integration.log
+          echo "== DB integration evidence =="
+          grep -E "PostgreSQL integration \(real DB\)" ci-reports/api-db-integration.log
+          grep -E "Tests +4 passed \(4\)" ci-reports/api-db-integration.log
+          if grep -E "[0-9]+ skipped" ci-reports/api-db-integration.log; then
+            echo "::error::DB integration tests were SKIPPED — infrastructure validation does not count."
+            exit 1
+          fi
+          echo "== Queue integration evidence =="
+          grep -E "BullMQ \+ real Redis integration" ci-reports/worker-queue-integration.log
+          grep -E "Tests +1 passed \(1\)" ci-reports/worker-queue-integration.log
+          if grep -E "[0-9]+ skipped" ci-reports/worker-queue-integration.log; then
+            echo "::error::Queue integration test was SKIPPED — infrastructure validation does not count."
+            exit 1
+          fi
+          echo "Guard passed: DB integration (4 tests) and queue integration (1 test) executed against real services."
+
+      # ---- SMTP safety gate -------------------------------------------------
+      - name: SMTP safety — DATA must never be issued
+        # The core suite drives a fixture SMTP server and asserts the DATA
+        # command is never sent; kept as its own step so a failure is
+        # visible as a dedicated gate rather than buried in unit output.
+        run: pnpm --filter @mailcheckr/core test 2>&1 | tee ci-reports/smtp-data-gate.log
+
+      # ---- Production builds ------------------------------------------------
+      - name: Web production build (next build)
+        run: |
+          set -o pipefail
+          pnpm --filter @mailcheckr/web build 2>&1 | tee ci-reports/web-build.log
+
+      - name: Docker build — API image (build only, no push)
+        run: |
+          set -o pipefail
+          docker build -f infra/docker/Dockerfile.api -t mailcheckr-api:ci . 2>&1 | tee ci-reports/docker-api.log
+
+      - name: Docker build — worker image (build only, no push)
+        run: |
+          set -o pipefail
+          docker build -f infra/docker/Dockerfile.worker -t mailcheckr-worker:ci . 2>&1 | tee ci-reports/docker-worker.log
+
+      - name: Docker build — web image (build only, no push)
+        run: |
+          set -o pipefail
+          docker build -f infra/docker/Dockerfile.web -t mailcheckr-web:ci . 2>&1 | tee ci-reports/docker-web.log
+
+      # ---- Artifacts ---------------------------------------------------------
+      - name: Upload test reports and build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: ci-reports/
+          if-no-files-found: warn

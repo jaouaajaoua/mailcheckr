@@ -1,0 +1,21 @@
+{
+  "dependencies": {
+    "@mailcheckr/contracts": "workspace:*",
+    "@mailcheckr/datasets": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  },
+  "main": "dist/index.js",
+  "name": "@mailcheckr/core",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "types": "dist/index.d.ts",
+  "version": "0.1.0"
+}

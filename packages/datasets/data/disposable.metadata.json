@@ -1,0 +1,9 @@
+{
+  "dataset": "disposable",
+  "description": "Curated in-repo SEED list only — a small starter set, NOT a licensed bulk dataset. Coverage is intentionally limited; production use requires a properly licensed, versioned dataset import per PRD §4.5 Stage 2.",
+  "source": "curated in-repo, public facts (well-known public service domains / conventional role prefixes, compiled by hand for this repository)",
+  "license": "curated in-repo, public facts",
+  "version": "1.0.0",
+  "importedAt": "2026-11-10T00:00:00.000Z",
+  "hash": "sha256:placeholder-seed-list-hash-not-a-licensed-import"
+}

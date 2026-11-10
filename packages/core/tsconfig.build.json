@@ -1,0 +1,1 @@
+{"compilerOptions":{"noEmit":false,"outDir":"dist","paths":{"@mailcheckr/contracts":["../contracts/dist/index.d.ts"],"@mailcheckr/datasets":["../datasets/dist/src/index.d.ts"]},"rootDir":"src"},"exclude":["**/*.test.ts"],"extends":"./tsconfig.json","include":["src"]}
