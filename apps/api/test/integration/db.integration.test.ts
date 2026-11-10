@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { PrismaRepository } from "../../src/repositories/prisma.repository";
 
 /**
  * REAL PostgreSQL integration tests — run ONLY when DATABASE_URL points at a
@@ -71,5 +73,92 @@ describe.skipIf(!DATABASE_URL)("PostgreSQL integration (real DB)", () => {
     const batchId = "55555555-5555-4555-8555-555555555555";
     await client.query("INSERT INTO batch_rows (batch_id, row_number) VALUES ($1, 1)", [batchId]);
     await expect(client.query("INSERT INTO batch_rows (batch_id, row_number) VALUES ($1, 1)", [batchId])).rejects.toMatchObject({ code: "23505" });
+  });
+});
+
+/**
+ * PrismaRepository runtime-path verification — the production repository
+ * class itself (not raw SQL) against the real database. This is the test
+ * that proves the @prisma/client dependency declared in apps/api actually
+ * loads, connects, and round-trips through the generated client; the
+ * in-memory suites can never prove this. Runs in the same CI step/database
+ * as the suite above (DATABASE_URL must point at the integration DB; the
+ * file-level beforeAll of the first suite has already applied the init
+ * migration, and this suite applies the second migration so the schema
+ * matches the generated client exactly).
+ */
+describe.skipIf(!DATABASE_URL)("PrismaRepository (real DB, production runtime path)", () => {
+  let repo: PrismaRepository;
+  const runId = randomUUID().slice(0, 8);
+  const email = `prisma-repo-${runId}@integration.test`;
+  let userId = "";
+  let workspaceId = "";
+
+  beforeAll(async () => {
+    const pgModule: any = await import("pg");
+    const pg = pgModule.default ?? pgModule;
+    const setup = new pg.Client({ connectionString: DATABASE_URL });
+    await setup.connect();
+    const mig2 = readFileSync(
+      join(__dirname, "../../../../packages/database/prisma/migrations/20261110010000_batch_name_and_ledger_retention/migration.sql"),
+      "utf8",
+    );
+    await setup.query(mig2);
+    await setup.end();
+    repo = new PrismaRepository();
+  }, 60000);
+
+  afterAll(async () => {
+    await (repo as any)?.client?.$disconnect?.();
+  });
+
+  it("user + workspace CRUD round-trip through the generated Prisma client", async () => {
+    const user = await repo.createUser({ email, passwordHash: "x" });
+    expect(user.id).toBeTruthy();
+    expect(user.email).toBe(email);
+    userId = user.id;
+
+    const byEmail = await repo.findUserByEmail(email);
+    expect(byEmail?.id).toBe(userId);
+    const byId = await repo.findUserById(userId);
+    expect(byId?.email).toBe(email);
+
+    const workspace = await repo.createWorkspace({ ownerUserId: userId, name: "Prisma Repo WS", planCode: "free" });
+    workspaceId = workspace.id;
+    const foundWs = await repo.findWorkspaceByOwner(userId);
+    expect(foundWs?.id).toBe(workspaceId);
+    const wsById = await repo.findWorkspaceById(workspaceId);
+    expect(wsById?.ownerUserId).toBe(userId);
+  });
+
+  it("API key + ledger + batch round-trip, tenant-scoped, ledger idempotent", async () => {
+    const key = await repo.createApiKey({
+      workspaceId, name: "ci-key", keyPrefix: `mc_live_ci_${runId}`, keyHash: "hash-only",
+      scopes: ["verify"], expiresAt: null,
+    });
+    const listed = await repo.listApiKeys(workspaceId);
+    expect(listed.map((k: any) => k.id)).toContain(key.id);
+    const revoked = await repo.revokeApiKey(workspaceId, key.id);
+    expect(revoked?.revokedAt).toBeTruthy();
+    // Tenant isolation through the repository: another workspace sees nothing.
+    expect(await repo.findApiKeyById("99999999-9999-4999-8999-999999999999", key.id)).toBeNull();
+    expect(await repo.listApiKeys("99999999-9999-4999-8999-999999999999")).toHaveLength(0);
+
+    const grant = { workspaceId, entryType: "grant" as const, quantity: 100, idempotencyKey: `it:prisma-repo:grant:${runId}`, batchId: null, verificationRecordId: null, description: "integration grant" };
+    const first = await repo.createLedgerEntry(grant);
+    const second = await repo.createLedgerEntry(grant);
+    expect(second.id).toBe(first.id); // idempotent — never double-applied
+    expect(await repo.sumLedger(workspaceId)).toBe(100);
+
+    const batch = await repo.createBatch({
+      workspaceId, createdByUserId: userId, name: "prisma-repo-batch", sourceType: "api",
+      originalFilename: null, emailColumnName: null, mode: "quick", status: "queued",
+      rowCount: 1, uniqueCount: 1, duplicateCount: 0, completedCount: 0,
+      invalidCount: 0, riskyCount: 0, unknownCount: 0,
+      creditsReserved: 0, creditsCharged: 0, creditsRefunded: 0,
+      idempotencyKey: null, startedAt: null, completedAt: null, expiresAt: null,
+    });
+    expect((await repo.findBatchById(workspaceId, batch.id))?.name).toBe("prisma-repo-batch");
+    expect(await repo.findBatchById("99999999-9999-4999-8999-999999999999", batch.id)).toBeNull();
   });
 });

@@ -31,6 +31,15 @@ RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app /app
+# OpenAPI spec (Defect fix): the API serves the checked-in spec from disk —
+# apps/api/src/openapi/openapi.controller.ts resolves, for the compiled
+# layout dist/openapi/ -> ../../../../docs/openapi.json, i.e. exactly
+# /app/docs/openapi.json in this image (also matched by the <cwd>/docs
+# candidate). .dockerignore keeps docs/* out of the build context except
+# this one file; copy it explicitly so its presence does not depend on the
+# build stage's COPY . . behaviour. Verified in CI by running this image
+# and curling GET /v1/openapi.json (see .github/workflows/ci.yml).
+COPY docs/openapi.json ./docs/openapi.json
 USER mailcheckr
 EXPOSE 4000
 # Migrations are an explicit deploy step (see docs/deployment.md):
