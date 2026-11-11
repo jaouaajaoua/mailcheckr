@@ -2,9 +2,18 @@ import type { Repository } from "./repository";
 
 /**
  * Production repository backed by Prisma/PostgreSQL (schema in
- * @mailcheckr/database). The Prisma client is loaded lazily so the API can
- * boot in tests/dev with the in-memory implementation when DATABASE_URL is
- * unset. All queries are scoped by workspaceId (tenant isolation, PRD §7).
+ * @mailcheckr/database). All queries are scoped by workspaceId
+ * (tenant isolation, PRD §7).
+ *
+ * The Prisma client is loaded LAZILY (in the constructor, not via a static
+ * top-level import) on purpose:
+ *  - AppModule imports this class statically but only *instantiates* it when
+ *    DATABASE_URL is set; a static import of "@prisma/client" would make
+ *    every unit test and every DB-less boot depend on a generated client.
+ *  - "@prisma/client" IS a declared dependency of @mailcheckr/api
+ *    (apps/api/package.json, version aligned with packages/database) — the
+ *    laziness is about *when* it loads, not about it being optional.
+ *    apps/api/test/prisma-runtime.test.ts guards the declaration.
  */
 export class PrismaRepository implements Repository {
   private client: any;

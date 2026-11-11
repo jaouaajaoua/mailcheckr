@@ -1,6 +1,7 @@
 # MailCheckr API (NestJS + Fastify) — multi-stage build.
 # Build context: repository root.  docker build -f infra/docker/Dockerfile.api .
 FROM node:22-alpine AS base
+RUN apk add --no-cache openssl
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate
 WORKDIR /app
 
@@ -14,7 +15,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/database/package.json packages/database/package.json
 COPY packages/datasets/package.json packages/datasets/package.json
-RUN pnpm install --frozen-lockfile --filter @mailcheckr/api... || pnpm install --filter @mailcheckr/api...
+RUN pnpm install --frozen-lockfile --filter @mailcheckr/api... --filter @mailcheckr/database... || pnpm install --filter @mailcheckr/api... --filter @mailcheckr/database...
 
 FROM base AS build
 COPY --from=deps /app /app
@@ -26,11 +27,21 @@ RUN pnpm --filter @mailcheckr/database exec prisma generate \
  && pnpm --filter @mailcheckr/api build
 
 FROM node:22-alpine AS runtime
+RUN apk add --no-cache openssl
 RUN corepack enable && corepack prepare pnpm@9.15.0 --activate \
  && addgroup -S mailcheckr && adduser -S mailcheckr -G mailcheckr
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /app /app
+# OpenAPI spec (Defect fix): the API serves the checked-in spec from disk —
+# apps/api/src/openapi/openapi.controller.ts resolves, for the compiled
+# layout dist/openapi/ -> ../../../../docs/openapi.json, i.e. exactly
+# /app/docs/openapi.json in this image (also matched by the <cwd>/docs
+# candidate). .dockerignore keeps docs/* out of the build context except
+# this one file; copy it explicitly so its presence does not depend on the
+# build stage's COPY . . behaviour. Verified in CI by running this image
+# and curling GET /v1/openapi.json (see .github/workflows/ci.yml).
+COPY docs/openapi.json ./docs/openapi.json
 USER mailcheckr
 EXPOSE 4000
 # Migrations are an explicit deploy step (see docs/deployment.md):

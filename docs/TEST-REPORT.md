@@ -64,6 +64,24 @@ gated suite reports as skipped, `next build`, all three Docker image
 builds, and `ci-reports/` artifact upload. **A green CI run is still
 required before DB/queue integration may be claimed.**
 
+## 2c. Corrective pass (2026-11-10) — Prisma dependency + Docker OpenAPI defects
+
+Two known defects fixed in a dedicated commit on top of `c08b458`:
+
+**Defect 1 — `@prisma/client` undeclared in `apps/api`.**
+- `apps/api/package.json` now declares `"@prisma/client": "^5.22.0"` (exact match with `packages/database`); `pnpm install` re-run, `pnpm-lock.yaml` updated (`5.22.0(prisma@5.22.0)` under the apps/api importer), and `require.resolve("@prisma/client")` from the API package root verified. The lazy `require()` in `PrismaRepository` is kept deliberately and documented in the class comment.
+- New guard `apps/api/test/prisma-runtime.test.ts` (**3 tests, always run**): declaration + version alignment with `packages/database`, resolvability from the API root, and a scan asserting every bare specifier the repository loads is declared.
+- New DB-gated tests in `apps/api/test/integration/db.integration.test.ts` (**+2, suite now 6**): construct the real `PrismaRepository` against the CI database and round-trip user/workspace/API-key/ledger/batch with tenant isolation and ledger idempotency through the generated client. CI skip-guard updated to expect exactly `Tests 6 passed (6)` with zero skipped.
+- Local totals after this pass: `apps/api` **62 passed, 6 skipped** (skips = the 6 gated integration tests); `apps/worker` **14 passed, 1 skipped** (unchanged — worker audited, no undeclared imports); `tsc --noEmit` clean for api + worker.
+- `prisma generate` / `prisma validate` attempted locally and **still fail** — exact sandbox error: `Error: aborted, code: 'ECONNRESET'` while downloading engine binaries from binaries.prisma.sh (proxy-blocked). Not faked; CI runs both before the integration steps.
+
+**Defect 2 — `docs/openapi.json` missing from the API Docker image.**
+- `.dockerignore`: `docs/*` excluded with `!docs/openapi.json` negated back in. `infra/docker/Dockerfile.api`: runtime stage explicitly `COPY docs/openapi.json ./docs/openapi.json`, placing the spec at `/app/docs/openapi.json` — the exact path the compiled controller resolves (`dist/openapi/` → `../../../../docs/openapi.json`).
+- Local proof without Docker (filesystem simulation of the container layout, real compiled controller, plain node): **without** the spec, `resolveOpenApiSpecPath()` returns `null` (original defect reproduced); **with** it at the container path, the spec loads — OpenAPI 3.1.0, 20 paths. A CI step ("Docker runtime — API image serves /v1/openapi.json") now runs the built image against the job's Postgres and asserts `/health` + `/v1/openapi.json` responses; **that container run is CI-only proof** and remains CI-PENDING until observed.
+- `Dockerfile.worker` / `Dockerfile.web` checked: neither serves or reads the spec (grep-verified) — no change needed.
+
+Grand total after this pass: **282 passed, 7 skipped, 0 failed** (279 + 3 new API runtime-guard tests; skips +2 = the new gated PrismaRepository tests). Secret scan re-run: clean.
+
 ## 3. Verification core — unit tests (PRD §13.1)
 
 Covered by the 188 passing `@mailcheckr/core` tests plus contracts/datasets suites: syntax/normalisation edge cases, IDN→Punycode, SMTPUTF8-unsupported handling, duplicate normalisation, role/disposable/free-provider lookup, Null MX and implicit-MX fallback rules, DNS failure taxonomy (NXDOMAIN vs SERVFAIL vs REFUSED vs TIMEOUT — infrastructure failures never classify as `invalid`), SMTP response parsing incl. enhanced codes (generic 550 → `unknown`, definitive 5.1.1 → `invalid`), classification for every status + reason code, SSRF IP blocklist (private/loopback/link-local/multicast/reserved/metadata, peer-IP verification), catch-all matrix, credit-chargeability rules, CSV formula-injection escaping, and the **DATA-command prohibition** tests (fixture transports assert DATA is never issued; STARTTLS-missing aborts before RCPT).

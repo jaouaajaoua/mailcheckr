@@ -9,6 +9,10 @@ coverage
 .env.*
 !.env.example
 *.log
-docs
+# Keep the docs tree out of build contexts EXCEPT the OpenAPI spec: the API
+# serves docs/openapi.json from disk at runtime (GET /v1/openapi.json) and
+# its Docker image must contain it. Dockerfile.api copies it explicitly.
+docs/*
+!docs/openapi.json
 README.md
 .turbo

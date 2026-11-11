@@ -185,7 +185,7 @@ jobs:
           sed -i -r 's/\x1b\[[0-9;]*m//g' ci-reports/api-db-integration.log ci-reports/worker-queue-integration.log
           echo "== DB integration evidence =="
           grep -E "PostgreSQL integration \(real DB\)" ci-reports/api-db-integration.log
-          grep -E "Tests +4 passed \(4\)" ci-reports/api-db-integration.log
+          grep -E "Tests +6 passed \(6\)" ci-reports/api-db-integration.log
           if grep -E "[0-9]+ skipped" ci-reports/api-db-integration.log; then
             echo "::error::DB integration tests were SKIPPED — infrastructure validation does not count."
             exit 1
@@ -197,7 +197,7 @@ jobs:
             echo "::error::Queue integration test was SKIPPED — infrastructure validation does not count."
             exit 1
           fi
-          echo "Guard passed: DB integration (4 tests) and queue integration (1 test) executed against real services."
+          echo "Guard passed: DB integration (6 tests, incl. 2 PrismaRepository production-path tests) and queue integration (1 test) executed against real services."
 
       # ---- SMTP safety gate -------------------------------------------------
       - name: SMTP safety — DATA must never be issued
@@ -226,6 +226,54 @@ jobs:
         run: |
           set -o pipefail
           docker build -f infra/docker/Dockerfile.web -t mailcheckr-web:ci . 2>&1 | tee ci-reports/docker-web.log
+
+      # ---- Docker runtime verification (API image) -------------------------
+      # Proves the built API image actually CONTAINS docs/openapi.json at the
+      # path apps/api/src/openapi/openapi.controller.ts resolves in the
+      # container layout (/app/docs/openapi.json) and serves it — a build
+      # success alone does not prove this (.dockerignore once excluded all
+      # of docs/). Runs the real image on the host network so the API can
+      # reach the job's PostgreSQL service; fails loudly on any mismatch.
+      - name: Docker runtime — API image serves /v1/openapi.json
+        env:
+          DATABASE_URL: postgres://mailcheckr:mailcheckr_ci@localhost:5432/mailcheckr_test
+        run: |
+          set -e
+          cleanup() { docker rm -f mailcheckr-api-ci >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --name mailcheckr-api-ci --network host \
+            -e NODE_ENV=production \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e JWT_SECRET="$JWT_SECRET" \
+            -e ENCRYPTION_KEY="$ENCRYPTION_KEY" \
+            -e HMAC_KEY="$HMAC_KEY" \
+            -e SMTP_DEEP_ENABLED=false \
+            -e SMTP_EGRESS_APPROVED=false \
+            mailcheckr-api:ci
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:4000/health > ci-reports/docker-api-health.json 2>/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::API container did not become healthy on /health"
+            docker logs mailcheckr-api-ci 2>&1 | tee ci-reports/docker-api-container.log
+            exit 1
+          fi
+          curl -fsS http://localhost:4000/v1/openapi.json > ci-reports/docker-api-openapi.json
+          docker logs mailcheckr-api-ci 2>&1 | tee ci-reports/docker-api-container.log
+          python3 - <<'PY'
+          import json
+          with open("ci-reports/docker-api-health.json") as f:
+              health = json.load(f)
+          assert health.get("status") == "ok", f"unexpected /health body: {health}"
+          with open("ci-reports/docker-api-openapi.json") as f:
+              spec = json.load(f)
+          assert spec.get("openapi") == "3.1.0", f"unexpected openapi version: {spec.get('openapi')}"
+          paths = spec.get("paths", {})
+          assert len(paths) >= 20, f"expected >=20 paths in served spec, got {len(paths)}"
+          print(f"Docker runtime verified: /health ok; /v1/openapi.json served OpenAPI {spec['openapi']} with {len(paths)} paths from inside the API image.")
+          PY
 
       # ---- Artifacts ---------------------------------------------------------
       - name: Upload test reports and build logs
